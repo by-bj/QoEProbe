@@ -96,6 +96,10 @@
     var ql = '';
     try { var p = document.getElementById('movie_player'); if (p && p.getPlaybackQuality) ql = p.getPlaybackQuality(); } catch (e) {}
     var src = v.currentSrc || '';
+    if (src && src.indexOf('blob:') !== 0 && v.__qsrc !== src) {
+      v.__qsrc = src;
+      send({ t: 'src', id: vid(v), url: src.slice(0, 4000) });
+    }
     send({
       t: 's', id: vid(v), ct: ct, du: isFinite(v.duration) ? v.duration : -1,
       p: v.paused, e: v.ended, sk: v.seeking, rs: v.readyState,

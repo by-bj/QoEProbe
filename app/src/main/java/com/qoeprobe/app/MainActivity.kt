@@ -94,7 +94,7 @@ class MainActivity : Activity() {
 
         head("Export")
         row("Export CSVs → Download/QoEProbe" to { export() })
-        note("Files are also in Android/data/com.qoeprobe.app/files/csv")
+        note("Each test auto-saves to Download/QoEProbe when it finishes. Use this to re-copy everything.")
 
         head("Log")
         log = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextIsSelectable(true) }
@@ -171,27 +171,13 @@ class MainActivity : Activity() {
                 if (++n % 10 == 0) say("  cov ${s["rat"]} PCI ${s["pci"]} RSRP ${s["rsrp"]} SINR ${s["sinr"]} NR ${s["nr_ss_rsrp"]}")
                 Thread.sleep(1000)
             }
-            csv.close(); say("Coverage log stopped ($n rows)")
+            csv.close(); Exporter.export(this, listOf(f)); say("Coverage log stopped ($n rows) → Download/QoEProbe")
         }
     }
 
     private fun export() = bg.execute {
-        val since = prefs.getLong("lastExport", 0)
-        var n = 0
-        Files.dir(this).listFiles()?.filter { it.isFile && it.lastModified() > since }?.forEach { f ->
-            try {
-                val cv = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/QoEProbe")
-                }
-                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: return@forEach
-                contentResolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
-                n++
-            } catch (e: Exception) { say("Export failed for ${f.name}: ${e.message}") }
-        }
-        prefs.edit().putLong("lastExport", System.currentTimeMillis()).apply()
-        say("Exported $n new/updated file(s) to Download/QoEProbe")
+        val n = Exporter.exportAll(this)
+        say("Exported $n file(s) to Download/QoEProbe")
     }
 
     override fun onDestroy() { covRunning = false; super.onDestroy() }

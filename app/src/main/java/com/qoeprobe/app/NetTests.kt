@@ -64,6 +64,7 @@ object NetTests {
             d2(pct(steady, 0.1)), d2(pct(steady, 0.5)), d2(pct(steady, 0.9)), d2(total / 1e6),
             "", "", "", "", "", "", "", "", errors.get()
         ) + RADIO_SUM.map { r0[it] })
+        Exporter.exportAsync(c, listOf(f, summary(c)))
         say("$dir done: avg ${d1(avg)} Mbps, peak ${d1(per.maxOrNull() ?: 0.0)}, p50 ${d1(pct(steady, 0.5))} | ${f.name}")
     }
 
@@ -142,6 +143,7 @@ object NetTests {
             sent, recv, d2(loss), d1(rtts.minOrNull() ?: 0.0), d1(if (rtts.isEmpty()) 0.0 else rtts.average()),
             d1(rtts.maxOrNull() ?: 0.0), d1(pct(rtts, 0.95)), d2(jitter), ""
         ) + RADIO_SUM.map { r0[it] })
+        Exporter.exportAsync(c, listOf(f, summary(c)))
         say("Ping done: loss ${d2(loss)}% ($recv/$sent), avg ${d1(if (rtts.isEmpty()) 0.0 else rtts.average())} ms, jitter ${d1(jitter)} ms | ${f.name}")
     }
 }

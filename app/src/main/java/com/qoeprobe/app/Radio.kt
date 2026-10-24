@@ -88,7 +88,8 @@ object Radio : LocationListener {
                     o["rat"] = "LTE"; o["mcc"] = id.mccString ?: ""; o["mnc"] = id.mncString ?: ""
                     o["tac"] = v(id.tac); o["cell_id"] = v(id.ci); o["pci"] = v(id.pci); o["arfcn"] = v(id.earfcn)
                     o["bw_khz"] = v(id.bandwidth)
-                    if (Build.VERSION.SDK_INT >= 30) o["band"] = id.bands.joinToString("/")
+                    o["band"] = lteBand(id.earfcn)
+                        ?: if (Build.VERSION.SDK_INT >= 30) id.bands.joinToString("/") else ""
                     o["rsrp"] = v(s.rsrp); o["rsrq"] = v(s.rsrq); o["sinr"] = v(s.rssnr)
                     o["cqi"] = v(s.cqi); o["ta"] = v(s.timingAdvance); o["rssi"] = v(s.rssi)
                 }
@@ -146,6 +147,16 @@ object Radio : LocationListener {
             else -> null
         }
     }.joinToString(";")
+
+    /** LTE band from DL EARFCN (3GPP 36.101); modems sometimes report odd band lists. */
+    private val LTE_BANDS = listOf(
+        1 to 0..599, 2 to 600..1199, 3 to 1200..1949, 4 to 1950..2399, 5 to 2400..2649, 7 to 2750..3449,
+        8 to 3450..3799, 12 to 5010..5179, 13 to 5180..5279, 17 to 5730..5849, 20 to 6150..6449,
+        25 to 8040..8689, 26 to 8690..9039, 28 to 9210..9659, 32 to 9920..10359, 38 to 37750..38249,
+        39 to 38250..38649, 40 to 38650..39649, 41 to 39650..41589, 42 to 41590..43589,
+        66 to 66436..67335, 71 to 68586..68935
+    )
+    private fun lteBand(earfcn: Int): String? = LTE_BANDS.firstOrNull { earfcn in it.second }?.first?.toString()
 
     private fun netName(t: Int) = when (t) {
         TelephonyManager.NETWORK_TYPE_NR -> "NR"

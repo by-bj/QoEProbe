@@ -31,16 +31,16 @@ class VideoTestActivity : Activity() {
         val SAMPLE_HDR = listOf(
             "time", "elapsed_s", "test_id", "platform", "video_id", "state", "position_s", "duration_s",
             "buffer_ahead_s", "width", "height", "yt_quality", "delivery", "video_codec", "audio_codec",
-            "dropped_frames", "total_frames", "media_bytes_total", "media_kbps", "app_rx_mbps",
+            "dropped_frames", "total_frames", "media_bytes_total", "media_kbps", "nominal_kbps", "app_rx_mbps",
             "stall_count", "stall_time_s"
         )
         val EVENT_HDR = listOf("time", "elapsed_s", "test_id", "event", "video_id", "width", "height", "position_s", "detail")
         val SUMMARY_HDR = listOf(
             "test_id", "start_time", "platform", "url", "logged_in", "end_reason",
             "page_load_ms", "time_to_first_frame_ms", "join_time_ms", "play_time_s",
-            "stall_count", "stall_time_s", "rebuffer_ratio_pct", "stalls_per_min", "res_switches",
+            "stall_count", "stall_time_s", "rebuffer_ratio_pct", "stalls_per_min", "res_switches", "videos_played",
             "avg_height", "min_height", "max_height", "last_res", "video_codecs", "audio_codecs",
-            "dropped_frames", "total_frames", "dropped_pct", "avg_media_kbps", "avg_app_rx_mbps", "peak_app_rx_mbps",
+            "dropped_frames", "total_frames", "dropped_pct", "avg_media_kbps", "avg_nominal_kbps", "avg_app_rx_mbps", "peak_app_rx_mbps",
             "rat_seen", "pcis_seen", "avg_rsrp", "min_rsrp", "avg_rsrq", "avg_sinr", "avg_nr_ss_rsrp", "avg_nr_ss_sinr",
             "start_lat", "start_lon"
         )
@@ -56,6 +56,8 @@ class VideoTestActivity : Activity() {
     private val navStart = SystemClock.elapsedRealtime()
     private lateinit var samples: Csv
     private lateinit var events: Csv
+    private lateinit var samplesFile: File
+    private lateinit var eventsFile: File
     private val lock = Any()
     private val ui = Handler(Looper.getMainLooper())
 
@@ -67,6 +69,11 @@ class VideoTestActivity : Activity() {
     private var activeId = Int.MIN_VALUE
     private var lastCt = -1.0
     private var lastH = 0
+    private var videosPlayed = 0
+    private val srcInfo = HashMap<Int, Pair<String, Int>>()   // video id -> (codec label, nominal kbps)
+    private val rxWin = ArrayDeque<Pair<Long, Long>>()
+    private var nomSum = 0.0
+    private var nomT = 0.0
     private var lastSampleAt = 0L
     private var lastVideoSampleAt = 0L
     private var lastRadioAt = 0L
@@ -102,8 +109,10 @@ class VideoTestActivity : Activity() {
         durMs = intent.getIntExtra("dur", 60) * 1000L
         rx0 = TrafficStats.getUidRxBytes(Process.myUid()); lastRx = rx0
         val tag = platform.lowercase()
-        samples = Csv(Files.newFile(this, "video_samples_$tag", id), SAMPLE_HDR + Radio.KEYS)
-        events = Csv(Files.newFile(this, "video_events_$tag", id), EVENT_HDR)
+        samplesFile = Files.newFile(this, "video_samples_$tag", id)
+        eventsFile = Files.newFile(this, "video_events_$tag", id)
+        samples = Csv(samplesFile, SAMPLE_HDR + Radio.KEYS)
+        events = Csv(eventsFile, EVENT_HDR)
         Radio.snapshot().let { startLat = it["lat"] ?: ""; startLon = it["lon"] ?: "" }
 
         status = TextView(this).apply {
@@ -167,6 +176,7 @@ class VideoTestActivity : Activity() {
                     "s" -> onSample(o)
                     "ev" -> onEvent(o)
                     "codec" -> onCodec(o)
+                    "src" -> onSrc(o)
                 }
             } catch (_: Exception) {}
         }
@@ -195,6 +205,38 @@ class VideoTestActivity : Activity() {
         }
     }
 
+    /** Progressive MP4 (IG/FB CDN): decode the efg URL parameter for encode profile + bitrate. */
+    private fun onSrc(o: JSONObject) {
+        synchronized(lock) {
+            if (finished) return
+            val vid = o.optInt("id"); val url = o.optString("url")
+            var tag = ""; var kbps = -1; var raw = ""
+            try {
+                val efg = android.net.Uri.parse(url).getQueryParameter("efg")
+                if (!efg.isNullOrEmpty()) {
+                    var b = efg.replace('-', '+').replace('_', '/')
+                    while (b.length % 4 != 0) b += "="
+                    raw = String(android.util.Base64.decode(b, android.util.Base64.DEFAULT))
+                    val j = JSONObject(raw)
+                    tag = j.optString("vencode_tag")
+                    val br = j.optLong("bitrate", 0L)
+                    if (br > 0) kbps = (br / 1000).toInt()
+                }
+            } catch (_: Exception) {}
+            val t = tag.lowercase()
+            val codec = when {
+                t.isEmpty() -> "progressive-mp4"
+                "av1" in t -> "av1"
+                "vp9" in t -> "vp9"
+                "hevc" in t || "h265" in t -> "hevc"
+                else -> "h264"
+            } + listOf("baseline", "main", "high").firstOrNull { it in t }?.let { "-$it" }.orEmpty()
+            srcInfo[vid] = codec to kbps
+            vcodecs.add(codec)
+            event("src", vid, 0, 0, 0.0, "codec=$codec nominal_kbps=$kbps tag=$tag host=${android.net.Uri.parse(url).host ?: ""} efg=${raw.take(300)}")
+        }
+    }
+
     private fun onSample(o: JSONObject) {
         var st = ""
         synchronized(lock) {
@@ -208,7 +250,11 @@ class VideoTestActivity : Activity() {
             lastSampleAt = now
 
             val rx = TrafficStats.getUidRxBytes(Process.myUid())
-            val rxMbps = if (rx >= lastRx) (rx - lastRx) * 8 / 1e6 / dt else 0.0
+            // 2 s rolling window: TrafficStats updates in bursts
+            rxWin.addLast(now to rx)
+            while (rxWin.size > 2 && now - rxWin[1].first >= 2000) rxWin.removeFirst()
+            val w0 = rxWin.first()
+            val rxMbps = if (now > w0.first && rx >= w0.second) (rx - w0.second) * 8 / 1e6 / ((now - w0.first) / 1000.0) else 0.0
             lastRx = rx
             if (rxMbps > peakRx) peakRx = rxMbps
             val mb = o.optLong("vb") + o.optLong("ab")
@@ -226,7 +272,8 @@ class VideoTestActivity : Activity() {
                 val rate = o.optDouble("r", 1.0)
                 w = o.optInt("w"); h = o.optInt("h")
                 if (vid != activeId) {
-                    activeId = vid; lastCt = -1.0; frozen = false
+                    activeId = vid; lastCt = -1.0; frozen = false; lastH = 0
+                    if (vid != 0) videosPlayed++
                     event("active_video", vid, w, h, ct, "")
                 }
                 val adv = if (lastCt >= 0) ct - lastCt else 0.0
@@ -243,6 +290,7 @@ class VideoTestActivity : Activity() {
                 else if (started && !paused && !ended && adv > 0) {
                     playMs += dt * 1000
                     if (h > 0) { hTime += h * dt; if (h < minH) minH = h }
+                    srcInfo[vid]?.second?.takeIf { it > 0 }?.let { nomSum += it * dt; nomT += dt }
                 }
                 if (h > 0) {
                     if (lastH > 0 && h != lastH) { switches++; event("res_switch", vid, w, h, ct, "${lastH}p->${h}p") }
@@ -262,15 +310,18 @@ class VideoTestActivity : Activity() {
                 r["rat"]?.takeIf { it.isNotEmpty() }?.let { rats.add(it) }
             }
             val ba = o.optDouble("ba", 0.0)
+            val si = srcInfo[vid]
+            val vcOut = vc.ifEmpty { si?.first ?: "" }
+            val nomOut = si?.second?.takeIf { it > 0 }?.toString() ?: ""
             samples.row(listOf(
                 Files.now(), el(), id, platform, vid, state, d2(ct), d1(o.optDouble("du", -1.0)), d2(ba),
-                w, h, o.optString("ql"), o.optString("dl"), vc, ac, o.optLong("df"), o.optLong("tf"),
-                mb, d0(mediaKbps), d2(rxMbps), stalls, d1(stallMs / 1000)
+                w, h, o.optString("ql"), o.optString("dl"), vcOut, ac, o.optLong("df"), o.optLong("tf"),
+                mb, d0(mediaKbps), nomOut, d2(rxMbps), stalls, d1(stallMs / 1000)
             ) + Radio.KEYS.map { r[it] })
             st = "$state  t=${d1(ct)}s  ${w}x$h ${o.optString("ql")}\n" +
                     "buffer ${d1(ba)}s  stalls $stalls (${d1(stallMs / 1000)}s)  switches $switches\n" +
-                    "codec ${vc.ifEmpty { "?" }} / ${ac.ifEmpty { "?" }}  drop ${o.optLong("df")}/${o.optLong("tf")}\n" +
-                    "rx ${d1(rxMbps)} Mbps  media ${d0(mediaKbps)} kbps\n" +
+                    "codec ${vcOut.ifEmpty { "?" }} / ${ac.ifEmpty { "?" }}  drop ${o.optLong("df")}/${o.optLong("tf")}\n" +
+                    "rx ${d1(rxMbps)} Mbps  media ${d0(mediaKbps)} kbps  nominal ${nomOut.ifEmpty { "-" }} kbps  videos $videosPlayed\n" +
                     "${r["rat"]} PCI ${r["pci"]} RSRP ${r["rsrp"]} SINR ${r["sinr"]} NR ${r["nr_ss_rsrp"]}"
         }
         ui.post { if (!finished) status.text = st }
@@ -295,14 +346,15 @@ class VideoTestActivity : Activity() {
             Csv.appendRow(File(Files.dir(this), "video_summary.csv"), SUMMARY_HDR, listOf(
                 id, startTime, platform, url, Web.loggedIn(platform), reason,
                 pageLoadMs, ttff, join, d1(playS), stalls, d1(stallS), d2(rebuf),
-                d2(if (playS > 0) stalls / (playS / 60) else 0.0), switches,
+                d2(if (playS > 0) stalls / (playS / 60) else 0.0), switches, videosPlayed,
                 d0(avgH), if (minH == Int.MAX_VALUE) "" else minH, maxH, lastRes,
                 vcodecs.joinToString(" | "), acodecs.joinToString(" | "),
-                dropped, frames, d2(dropPct), d0(avgMedia), d2(avgRx), d2(peakRx),
+                dropped, frames, d2(dropPct), d0(avgMedia), if (nomT > 0) d0(nomSum / nomT) else "", d2(avgRx), d2(peakRx),
                 rats.joinToString("/"), pcis.joinToString("/"),
                 rsrp.avg(), rsrp.minS(), rsrq.avg(), sinr.avg(), nrRsrp.avg(), nrSinr.avg(), startLat, startLon
             ))
             samples.close(); events.close()
+            Exporter.exportAsync(this, listOf(samplesFile, eventsFile, File(Files.dir(this), "video_summary.csv")))
             text = "$platform [$reason]: TTFF ${ttff}ms, stalls $stalls (${d1(stallS)}s, ${d1(rebuf)}%), " +
                     "switches $switches, avg ${d0(avgH)}p max ${maxH}p, codec ${vcodecs.lastOrNull() ?: "?"}, " +
                     "media ${d0(avgMedia)} kbps, rx ${d1(avgRx)} Mbps, RSRP ${rsrp.avg()}"

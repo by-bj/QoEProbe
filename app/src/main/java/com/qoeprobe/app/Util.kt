@@ -102,3 +102,41 @@ object Web {
         }
     }
 }
+
+/** Copies CSVs to Download/QoEProbe (visible to file managers). Re-exporting a file overwrites it. */
+object Exporter {
+    private const val REL = "Download/QoEProbe/"
+
+    fun export(c: Context, files: List<File>): Int {
+        var n = 0
+        val cr = c.contentResolver
+        val col = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        for (f in files) {
+            if (!f.isFile) continue
+            try {
+                var uri: android.net.Uri? = null
+                cr.query(col, arrayOf(android.provider.MediaStore.MediaColumns._ID),
+                    "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${android.provider.MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                    arrayOf(f.name, REL), null)?.use { cur ->
+                    if (cur.moveToFirst()) uri = android.content.ContentUris.withAppendedId(col, cur.getLong(0))
+                }
+                if (uri == null) uri = cr.insert(col, android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, REL)
+                })
+                val u = uri ?: continue
+                cr.openOutputStream(u, "wt")?.use { out -> f.inputStream().use { it.copyTo(out) } }
+                n++
+            } catch (_: Exception) {}
+        }
+        return n
+    }
+
+    fun exportAsync(c: Context, files: List<File>) {
+        val app = c.applicationContext
+        kotlin.concurrent.thread(isDaemon = true) { export(app, files) }
+    }
+
+    fun exportAll(c: Context): Int = export(c, Files.dir(c).listFiles()?.toList() ?: emptyList())
+}
