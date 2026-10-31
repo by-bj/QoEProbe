@@ -13,19 +13,23 @@ import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.random.Random
 
+data class NetResult(val testId: String, val type: String, val kpi: Map<String, String>, val radio: Map<String, String>, val text: String)
+
 object NetTests {
     val NET_HDR = listOf(
         "test_id", "start_time", "type", "target", "streams", "duration_s",
         "avg_mbps", "peak_mbps", "p10_mbps", "p50_mbps", "p90_mbps", "total_MB",
         "sent", "received", "loss_pct", "rtt_min_ms", "rtt_avg_ms", "rtt_max_ms", "rtt_p95_ms", "jitter_ms",
-        "errors", "rat", "pci", "arfcn", "band", "rsrp", "rsrq", "sinr", "nr_ss_rsrp", "nr_ss_sinr", "lat", "lon"
+        "errors", "rat", "pci", "arfcn", "band", "rsrp", "rsrq", "sinr", "nr_ss_rsrp", "nr_ss_sinr", "lat", "lon",
+        "seq_id", "loop", "step"
     )
     private val RADIO_SUM = listOf("rat", "pci", "arfcn", "band", "rsrp", "rsrq", "sinr", "nr_ss_rsrp", "nr_ss_sinr", "lat", "lon")
 
-    private fun summary(c: Context) = File(Files.dir(c), "network_summary.csv")
+    private fun tag3(t: List<String>) = (t + listOf("", "", "")).take(3)
 
     // ---------------- HTTP throughput (multi-stream) ----------------
-    fun throughput(c: Context, down: Boolean, url: String, streams: Int, durSec: Int, say: (String) -> Unit) {
+    fun throughput(c: Context, down: Boolean, url: String, streams: Int, durSec: Int, say: (String) -> Unit,
+                   tags: List<String> = emptyList()): NetResult {
         val id = Files.stamp(); val start = Files.now(); val dir = if (down) "DL" else "UL"
         val f = Files.newFile(c, "throughput_$dir", id)
         val csv = Csv(f, listOf("time", "test_id", "direction", "second", "mbps", "total_bytes") + Radio.KEYS)
@@ -59,13 +63,14 @@ object NetTests {
         val avg = total * 8 / 1e6 / durSec
         // p10/p50/p90 exclude the first second (TCP slow start)
         val steady = if (per.size > 2) per.drop(1) else per
-        Csv.appendRow(summary(c), NET_HDR, listOf(
+        Results.record(c, "network_summary.csv", "NetworkResults", NET_HDR, listOf(
             id, start, "HTTP_$dir", url, streams, durSec, d2(avg), d2(per.maxOrNull() ?: 0.0),
             d2(pct(steady, 0.1)), d2(pct(steady, 0.5)), d2(pct(steady, 0.9)), d2(total / 1e6),
             "", "", "", "", "", "", "", "", errors.get()
-        ) + RADIO_SUM.map { r0[it] })
-        Exporter.exportAsync(c, listOf(f, summary(c)))
-        say("$dir done: avg ${d1(avg)} Mbps, peak ${d1(per.maxOrNull() ?: 0.0)}, p50 ${d1(pct(steady, 0.5))} | ${f.name}")
+        ) + RADIO_SUM.map { r0[it] } + tag3(tags), listOf(f to "throughput"))
+        val text = "$dir done: avg ${d1(avg)} Mbps, peak ${d1(per.maxOrNull() ?: 0.0)}, p50 ${d1(pct(steady, 0.5))} | ${f.name}"
+        say(text)
+        return NetResult(id, "HTTP_$dir", mapOf("avg_mbps" to d2(avg), "p50_mbps" to d2(pct(steady, 0.5))), r0, text)
     }
 
     private fun open(u: String): HttpURLConnection = (URL(u).openConnection() as HttpURLConnection).apply {
@@ -99,7 +104,8 @@ object NetTests {
     }
 
     // ---------------- ICMP latency / packet loss ----------------
-    fun ping(c: Context, host: String, count: Int, intervalS: String, say: (String) -> Unit) {
+    fun ping(c: Context, host: String, count: Int, intervalS: String, say: (String) -> Unit,
+             tags: List<String> = emptyList()): NetResult {
         val id = Files.stamp(); val start = Files.now()
         Radio.refresh(); val r0 = Radio.snapshot()
         say("Ping $host x$count (interval ${intervalS}s)…")
@@ -124,7 +130,10 @@ object NetTests {
                     line.contains("invalid", true)) say("  $line")
             }
             p.waitFor()
-        } catch (e: Exception) { say("Ping failed: ${e.message}"); return }
+        } catch (e: Exception) {
+            say("Ping failed: ${e.message}")
+            return NetResult(id, "ICMP", emptyMap(), r0, "Ping failed: ${e.message}")
+        }
         if (recv < 0) recv = replies.size
         val f = Files.newFile(c, "ping", id)
         val csv = Csv(f, listOf("time", "test_id", "host", "seq", "status", "rtt_ms", "rat", "pci", "rsrp", "sinr", "nr_ss_rsrp", "lat", "lon"))
@@ -138,12 +147,14 @@ object NetTests {
         val rtts = replies.values.map { it.second }
         val jitter = if (rtts.size > 1) rtts.zipWithNext { a, b -> abs(b - a) }.average() else 0.0
         val loss = if (sent > 0) (sent - recv) * 100.0 / sent else 0.0
-        Csv.appendRow(summary(c), NET_HDR, listOf(
+        val avgRtt = if (rtts.isEmpty()) 0.0 else rtts.average()
+        Results.record(c, "network_summary.csv", "NetworkResults", NET_HDR, listOf(
             id, start, "ICMP", host, 1, "", "", "", "", "", "", "",
-            sent, recv, d2(loss), d1(rtts.minOrNull() ?: 0.0), d1(if (rtts.isEmpty()) 0.0 else rtts.average()),
+            sent, recv, d2(loss), d1(rtts.minOrNull() ?: 0.0), d1(avgRtt),
             d1(rtts.maxOrNull() ?: 0.0), d1(pct(rtts, 0.95)), d2(jitter), ""
-        ) + RADIO_SUM.map { r0[it] })
-        Exporter.exportAsync(c, listOf(f, summary(c)))
-        say("Ping done: loss ${d2(loss)}% ($recv/$sent), avg ${d1(if (rtts.isEmpty()) 0.0 else rtts.average())} ms, jitter ${d1(jitter)} ms | ${f.name}")
+        ) + RADIO_SUM.map { r0[it] } + tag3(tags), listOf(f to "ping"))
+        val text = "Ping done: loss ${d2(loss)}% ($recv/$sent), avg ${d1(avgRtt)} ms, jitter ${d1(jitter)} ms | ${f.name}"
+        say(text)
+        return NetResult(id, "ICMP", mapOf("loss_pct" to d2(loss), "rtt_avg_ms" to d1(avgRtt)), r0, text)
     }
 }

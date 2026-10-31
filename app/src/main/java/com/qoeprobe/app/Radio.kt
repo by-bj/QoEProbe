@@ -19,6 +19,7 @@ import java.util.concurrent.Executors
 object Radio : LocationListener {
     val KEYS = listOf(
         "rat", "data_net", "operator", "mcc", "mnc", "tac", "cell_id", "pci", "arfcn", "band", "bw_khz",
+        "pcell_src", "ca_count", "scells", "reg_cells",
         "rsrp", "rsrq", "sinr", "cqi", "ta", "rssi", "rscp", "ecno",
         "nr_pci", "nr_arfcn", "nr_ss_rsrp", "nr_ss_rsrq", "nr_ss_sinr",
         "lat", "lon", "acc_m", "speed_kmh"
@@ -80,7 +81,22 @@ object Radio : LocationListener {
         val list = cells
         try { o["data_net"] = netName(tm.dataNetworkType) } catch (_: Exception) {}
         try { o["operator"] = tm.networkOperatorName ?: "" } catch (_: Exception) {}
-        for (c in list.filter { it.isRegistered }) {
+        // Primary serving cell first: with carrier aggregation some phones list several "registered" cells.
+        val reg = list.filter { it.isRegistered }
+        val prim = reg.firstOrNull { it.cellConnectionStatus == CellInfo.CONNECTION_PRIMARY_SERVING }
+        val sec = list.filter { it.cellConnectionStatus == CellInfo.CONNECTION_SECONDARY_SERVING }
+        o["pcell_src"] = when { prim != null -> "primary"; reg.isNotEmpty() -> "first_registered"; else -> "" }
+        o["ca_count"] = if (prim != null) (1 + sec.size).toString() else ""
+        o["scells"] = sec.mapNotNull { c ->
+            when (c) {
+                is CellInfoLte -> "L${v(c.cellIdentity.pci)}:${v(c.cellIdentity.earfcn)}"
+                is CellInfoNr -> (c.cellIdentity as CellIdentityNr).let { "N${v(it.pci)}:${v(it.nrarfcn)}" }
+                else -> null
+            }
+        }.joinToString(";")
+        o["reg_cells"] = reg.size.toString()
+        val ordered = if (prim != null) listOf(prim) + reg.filter { it !== prim } else reg
+        for (c in ordered) {
             val empty = o["rat"].isNullOrEmpty()
             when (c) {
                 is CellInfoLte -> if (empty) {

@@ -46,6 +46,11 @@ object Files {
 class Csv(f: File, header: List<String>, append: Boolean = false) {
     private val w: BufferedWriter
     init {
+        val hdr = header.joinToString(",")
+        // Columns changed after an app update: keep the old file aside so rows never misalign.
+        if (append && f.exists() && f.length() > 0 &&
+            (try { f.bufferedReader().use { it.readLine() } } catch (_: Exception) { hdr }) != hdr)
+            f.renameTo(File(f.parentFile, f.nameWithoutExtension + "_old_" + Files.stamp() + ".csv"))
         val hasHeader = append && f.exists() && f.length() > 0
         w = BufferedWriter(FileWriter(f, append))
         if (!hasHeader) { w.write(header.joinToString(",")); w.newLine(); w.flush() }
@@ -91,6 +96,7 @@ object Web {
                 cookie("https://m.facebook.com").contains("c_user=")
         "Instagram" -> cookie("https://www.instagram.com").contains("sessionid=")
         "YouTube" -> cookie("https://www.youtube.com").contains("SAPISID=")
+        "TikTok" -> cookie("https://www.tiktok.com").contains("sessionid=")
         else -> false
     }
 
@@ -136,6 +142,15 @@ object Exporter {
     fun exportAsync(c: Context, files: List<File>) {
         val app = c.applicationContext
         kotlin.concurrent.thread(isDaemon = true) { export(app, files) }
+    }
+
+    /** Removes this app's copy of a file from Download/QoEProbe. */
+    fun deleteCopy(c: Context, name: String) {
+        try {
+            c.contentResolver.delete(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${android.provider.MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf(name, REL))
+        } catch (_: Exception) {}
     }
 
     fun exportAll(c: Context): Int = export(c, Files.dir(c).listFiles()?.toList() ?: emptyList())
