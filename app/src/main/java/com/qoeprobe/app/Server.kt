@@ -146,9 +146,9 @@ object Access {
         Uploader.qdir(Server.app).listFiles()?.forEach { it.delete() }
     }
 
-    /** (allowed, reason). Open mode when no server is configured. */
+    /** (allowed, reason). Locked when no admin server is configured. */
     fun allowed(): Pair<Boolean, String> {
-        if (!Server.configured) return true to "Open mode: no admin server configured"
+        if (!Server.configured) return false to "This build is not connected to an admin server. Ask your admin for the current app."
         if (!registered) return false to "Register this phone first"
         return when (status) {
             "active" -> {

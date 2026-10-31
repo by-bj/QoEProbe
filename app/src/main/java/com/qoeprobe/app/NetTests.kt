@@ -36,7 +36,7 @@ object NetTests {
         Radio.refresh()
         val r0 = Radio.snapshot()
         val bytes = AtomicLong(); val stop = AtomicBoolean(false); val errors = AtomicInteger()
-        say("$dir test: $streams stream(s), $durSec s → $url")
+        say("$dir test: $streams stream(s), $durSec s")
         val workers = (1..streams).map {
             thread(isDaemon = true) {
                 while (!stop.get()) {

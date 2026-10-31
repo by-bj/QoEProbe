@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var accessStatus: TextView
     private lateinit var uploadStatus: TextView
     private lateinit var managedNote: TextView
+    private lateinit var testBox: LinearLayout
     private lateinit var covBtn: Button
     private val fields = LinkedHashMap<String, EditText>()
     private val bg = Executors.newSingleThreadExecutor()
@@ -39,8 +40,12 @@ class MainActivity : Activity() {
         Radio.init(this)
         Uploader.start(this)
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(24)) }
-        setContentView(ScrollView(this).apply { addView(root) })
+        val outer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(24)) }
+        setContentView(ScrollView(this).apply { addView(outer) })
+        val accessBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        testBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = android.view.View.GONE }
+        outer.addView(accessBox); outer.addView(testBox)
+        var root = accessBox
 
         fun head(t: String) = root.addView(TextView(this).apply {
             text = t; textSize = 17f; setTypeface(null, Typeface.BOLD); setPadding(0, dp(14), 0, dp(2))
@@ -70,6 +75,7 @@ class MainActivity : Activity() {
         row("Check access" to { refreshAccess(true) },
             "Register / edit details" to { startActivity(Intent(this, RegisterActivity::class.java)) })
 
+        root = testBox
         head("Accounts")
         loginStatus = note("")
         row("Login Facebook" to { login("https://m.facebook.com/login") },
@@ -81,7 +87,7 @@ class MainActivity : Activity() {
             })
         note("YouTube needs no login for public videos (Google blocks sign-in inside embedded browsers).")
 
-        managedNote = note("Fields greyed out are set by your admin's test plan.").apply { visibility = android.view.View.GONE }
+        managedNote = note("Test settings are managed by your admin.").apply { visibility = android.view.View.GONE }
 
         head("Drive-test sequence")
         field("seq_steps", "Steps, e.g. YouTube,Facebook,Instagram,TikTok,DL,UL,Ping", "YouTube,Facebook,Instagram,TikTok,DL,UL,Ping")
@@ -127,6 +133,7 @@ class MainActivity : Activity() {
         field("keep_days", "Delete uploaded phone files older than (days)", "7", true)
         row("Clean up phone files now" to { cleanup(true) })
 
+        root = accessBox
         head("Log")
         log = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextIsSelectable(true) }
         root.addView(log)
@@ -171,20 +178,28 @@ class MainActivity : Activity() {
 
     private fun updateAccessText() {
         val (ok, why) = Access.allowed()
-        accessStatus.text = if (!Server.configured) "Open mode: no admin server configured in this build." else
+        testBox.visibility = if (ok) android.view.View.VISIBLE else android.view.View.GONE
+        accessStatus.text = if (!Server.configured) why else
             "Device ${Access.deviceId} · ${Access.name().ifEmpty { "not registered" }}${if (Access.market().isNotEmpty()) " (${Access.market()})" else ""}\n" +
             (if (ok) "Access: active${if (Access.expiry().isNotEmpty()) " until ${Access.expiry()}" else ""}" else why)
     }
 
-    /** Admin test plan values replace and lock the matching fields. */
+    /**
+     * Admin test plan values replace the matching fields. Testers see no settings values (URLs, servers)
+     * unless the admin sets tester_settings = editable; then only fields the plan leaves blank are shown.
+     */
     private fun applyPlan() {
-        var any = false
+        val editable = Access.setting("tester_settings").lowercase() == "editable"
+        var managed = false
         fields.forEach { (k, f) ->
             val v = Access.plan(k)
-            if (v != null) { f.setText(v); f.isEnabled = false; any = true } else f.isEnabled = true
+            if (v != null) f.setText(v)
+            val show = (editable && v == null) || k == "keep_days"
+            f.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            if (!show) managed = true
         }
-        managedNote.visibility = if (any) android.view.View.VISIBLE else android.view.View.GONE
-        if (any) save()
+        managedNote.visibility = if (managed) android.view.View.VISIBLE else android.view.View.GONE
+        save()
     }
 
     private fun guard(a: () -> Unit) {
